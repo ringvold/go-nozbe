@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -19,42 +18,31 @@ const (
 
 var dlog = log.New(os.Stderr, "[nozbe] ", log.LstdFlags)
 var client = &http.Client{
-	Timeout: time.Second * 10,
+	Timeout: time.Second * 30,
+}
+
+type Nozbe interface {
+	GetProjects() []Project
+	CreateAction(name string, params map[string]string) Action
 }
 
 // structures ///////////////////////////
 
-// Session represents an active connection to the Nozbe API.
-type Session struct {
+type NozbeClient struct {
 	APIToken string
 	username string
 	password string
 }
 
-// {
-//   "id": "e6f437e4805",
-//   "name": "test",
-//   "name_show": "\ttest",
-//   "done": 0,
-//   "done_time": "0",
-//   "time": "60",
-//   "project_id": "014f30c20b",
-//   "project_name": "Alfred Workflow for Nozbe",
-//   "context_id": "5acebca56",
-//   "context_name": "Computer",
-//   "context_icon": "icon-47.png",
-//   "next": "next"
-// }
-
 type Action struct {
-	ID          int       `json:"id"`
+	ID          string    `json:"id"`
 	Name        string    `json:"name"`
 	NameShow    string    `json:"name_show"`
 	Done        bool      `json:"done"`
 	DoneTime    time.Time `json:"done_time"`
-	ProjectID   int       `json:"project_id"`
+	ProjectID   string    `json:"project_id"`
 	ProjectName string    `json:"project_name"`
-	ContextID   int       `json:"context_id"`
+	ContextID   string    `json:"context_id"`
 	ContextName string    `json:"context_name"`
 	ContextIcon string    `json:"context_icon"`
 	Next        string    `json:"next"`
@@ -72,19 +60,23 @@ type Project struct {
 	Count    string `json:"count,omitempty"`
 }
 
+type CreateResponse struct {
+	Response string `json:"response"`
+}
+
 // functions ////////////////////////////
 
 // OpenSession opens a session using an existing API token.
-func OpenSession(apiToken string) Session {
-	return Session{APIToken: apiToken}
+func OpenSession(apiToken string) NozbeClient {
+	return NozbeClient{APIToken: apiToken}
 }
 
 // // NewSession creates a new session by retrieving a user's API token.
-func NewSession(username, password string) (session Session, err error) {
+func NewSession(username, password string) (session NozbeClient, err error) {
 	session.username = username
 	session.password = password
 
-	data, err := session.get("/login", nil)
+	data, err := session.request("/login", nil)
 	if err != nil {
 		return session, err
 	}
@@ -102,10 +94,9 @@ func NewSession(username, password string) (session Session, err error) {
 	return session, nil
 }
 
-func (session *Session) GetProjects() ([]Project, error) {
+func (client *NozbeClient) GetProjects() ([]Project, error) {
 	var projects []Project
-	// params := map[string]string{}
-	data, err := session.get("/projects", nil)
+	data, err := client.request("/projects", nil)
 	if err != nil {
 		return projects, err
 	}
@@ -114,18 +105,39 @@ func (session *Session) GetProjects() ([]Project, error) {
 	return projects, err
 }
 
+func (client *NozbeClient) CreateAction(name string, params map[string]string) (Action, error) {
+	var action Action
+	path := fmt.Sprintf("/newaction/name-%s", name)
+	data, err := client.request(path, params)
+	if err != nil {
+		return action, err
+	}
+	var create CreateResponse
+	err = decodeCreateResponse(data, &create)
+	dlog.Println(create.Response)
+	action.ID = create.Response
+	return action, err
+}
+
 // support //////////////////////////////
 
-func (session *Session) request(method string, requestURL string, body io.Reader) ([]byte, error) {
+func (session *NozbeClient) request(path string, params map[string]string) ([]byte, error) {
+	requestURL := NozbeAPI + path
+
+	if params != nil {
+		for key, value := range params {
+			requestURL += fmt.Sprintf("/%s-%s", key, value)
+		}
+	}
 
 	if session.APIToken != "" {
 		requestURL += fmt.Sprintf("/key-%s", session.APIToken)
 	} else {
 		requestURL += fmt.Sprintf("/email-%s/password-%s", session.username, session.password)
-
 	}
 
-	req, err := http.NewRequest(method, requestURL, body)
+	dlog.Printf("GETing from URL: %s", requestURL)
+	req, err := http.NewRequest("GET", requestURL, nil)
 
 	req.Header.Add("Content-Type", "application/json")
 
@@ -147,22 +159,27 @@ func (session *Session) request(method string, requestURL string, body io.Reader
 	return content, nil
 }
 
-func (session *Session) get(path string, params map[string]string) ([]byte, error) {
-	requestURL := NozbeAPI + path
-
-	if params != nil {
-		for key, value := range params {
-			requestURL += fmt.Sprintf("/%s-%s", key, value)
-		}
-	}
-
-	dlog.Printf("GETing from URL: %s", requestURL)
-	return session.request("GET", requestURL, nil)
-}
-
 func decodeProjects(data []byte, projects *[]Project) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	err := dec.Decode(projects)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func decodeAction(data []byte, action *Action) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	err := dec.Decode(action)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func decodeCreateResponse(data []byte, create *CreateResponse) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	err := dec.Decode(create)
 	if err != nil {
 		return err
 	}
